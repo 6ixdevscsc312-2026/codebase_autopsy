@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Codebase Autopsy</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0A0C10; --panel:#12151B; --panel-alt:#1B2028; --text:#E4E7EC;
+    --muted:#7B8494; --border:#232830; --flag:#E4572E; --flag-dim:#E4572E33;
+    --healthy:#3DDC97;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font-family:"IBM Plex Sans",sans-serif; line-height:1.5; }
+  .mono { font-family:"IBM Plex Mono",monospace; }
+  .wrap { max-width:900px; margin:0 auto; padding:40px 20px 64px; }
+  h1 { font-size:1.5rem; margin:0 0 4px; }
+  .subtitle { color:var(--muted); font-size:0.9rem; margin-bottom:28px; }
+
+  form { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  input[type=text] { flex:1; min-width:220px; background:var(--panel); border:1px solid var(--border);
+    color:var(--text); padding:10px 12px; font-family:"IBM Plex Mono",monospace; font-size:0.85rem; }
+  button { background:var(--flag); color:var(--bg); border:none; padding:10px 20px;
+    font-weight:600; cursor:pointer; font-size:0.85rem; }
+  button:disabled { opacity:0.5; cursor:default; }
+  label.mock { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:0.82rem; }
+
+  .status { font-size:0.82rem; color:var(--muted); margin-bottom:24px; min-height:1.2em; }
+  .status.error { color:var(--flag); }
+
+  .section-label { font-size:0.72rem; color:var(--muted); letter-spacing:0.06em; margin-bottom:12px; }
+  section { margin-bottom:28px; }
+
+  .stats { display:flex; gap:24px; border:1px solid var(--border); background:var(--panel);
+    padding:14px 18px; font-size:0.85rem; }
+  .stats b { display:block; font-size:1.3rem; }
+
+  .anomaly-banner { border:1px solid var(--flag); background:var(--flag-dim);
+    padding:12px 16px; font-size:0.85rem; margin-bottom:10px; }
+  .anomaly-banner .tag { background:var(--flag); color:var(--bg); font-size:0.65rem;
+    font-weight:700; padding:2px 7px; margin-right:8px; }
+
+  .finding { border:1px solid var(--border); background:var(--panel-alt);
+    padding:14px 16px; margin-bottom:10px; }
+  .finding-top { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+  .score { font-family:"IBM Plex Mono",monospace; font-weight:600; width:26px; text-align:center;
+    padding:2px 0; border:1px solid var(--border); flex-shrink:0; }
+  .score.high { color:var(--flag); border-color:var(--flag); }
+  .score.low { color:var(--healthy); border-color:var(--healthy); }
+  .finding-path { font-family:"IBM Plex Mono",monospace; font-size:0.85rem; }
+  .finding-row { font-size:0.78rem; margin:3px 0; }
+  .finding-row .k { color:var(--muted); }
+  .evidence { font-size:0.76rem; color:var(--muted); margin-top:6px; padding-left:14px; }
+  .empty { color:var(--muted); font-size:0.85rem; font-style:italic; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Codebase Autopsy</h1>
+  <div class="subtitle">Point it at a local path or a public GitHub URL — it'll flag modules whose behavior drifted from their docstring.</div>
+
+  <form id="f">
+    <input type="text" id="repo" placeholder="https://github.com/org/repo or a local path" required>
+    <label class="mock"><input type="checkbox" id="mock" checked> mock mode (no Bobcoins used)</label>
+    <button type="submit" id="go">Analyze</button>
+  </form>
+  <div class="status" id="status"></div>
+
+  <div id="results" style="display:none;">
+    <section>
+      <div class="stats">
+        <div><b id="stat-modules">-</b><span style="color:var(--muted);">modules scanned</span></div>
+        <div><b id="stat-cycles">-</b><span style="color:var(--muted);">import cycles</span></div>
+        <div><b id="stat-findings">-</b><span style="color:var(--muted);">flagged</span></div>
+      </div>
+    </section>
+
+    <section>
+      <div class="section-label">IMPORT CYCLES</div>
+      <div id="cycles"></div>
+    </section>
+
+    <section>
+      <div class="section-label">FINDINGS — ranked by drift score</div>
+      <div id="findings"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+const form = document.getElementById('f');
+const statusEl = document.getElementById('status');
+const goBtn = document.getElementById('go');
+const results = document.getElementById('results');
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const repo = document.getElementById('repo').value.trim();
+  const mock = document.getElementById('mock').checked;
+  goBtn.disabled = true;
+  statusEl.className = 'status';
+  statusEl.textContent = 'Analyzing... this can take a minute on a real (non-mock) run.';
+  results.style.display = 'none';
+
+  try {
+    const res = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo, mock })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Analysis failed');
+    render(data);
+    statusEl.textContent = data.analysis_truncated
+      ? 'Done. (Analysis capped at max_modules — repo has more documented modules than were checked.)'
+      : 'Done.';
+  } catch (err) {
+    statusEl.className = 'status error';
+    statusEl.textContent = err.message;
+  } finally {
+    goBtn.disabled = false;
+  }
+});
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}
+
+function render(data) {
+  document.getElementById('stat-modules').textContent = data.module_count;
+  document.getElementById('stat-cycles').textContent = data.import_cycles.length;
+  document.getElementById('stat-findings').textContent = data.verdicts.length;
+
+  const cyclesEl = document.getElementById('cycles');
+  cyclesEl.innerHTML = data.import_cycles.length
+    ? data.import_cycles.map(c =>
+        `<div class="anomaly-banner"><span class="tag">CYCLE</span><span class="mono">${esc(c.join(' \u2192 '))}</span></div>`
+      ).join('')
+    : '<div class="empty">No import cycles found.</div>';
+
+  const findingsEl = document.getElementById('findings');
+  findingsEl.innerHTML = data.verdicts.length
+    ? data.verdicts.map(v => {
+        const score = v.drift_score ?? '?';
+        const cls = (typeof score === 'number' && score >= 5) ? 'high' : 'low';
+        const evidence = (v.evidence || []).map(e => `<li>${esc(e)}</li>`).join('');
+        return `<div class="finding">
+          <div class="finding-top">
+            <div class="score ${cls} mono">${esc(score)}</div>
+            <div class="finding-path">${esc(v.path)}</div>
+          </div>
+          <div class="finding-row"><span class="k">declared:</span> ${esc(v.declared_purpose)}</div>
+          <div class="finding-row"><span class="k">observed:</span> ${esc(v.observed_behavior)}</div>
+          ${evidence ? `<ul class="evidence">${evidence}</ul>` : ''}
+        </div>`;
+      }).join('')
+    : '<div class="empty">No modules with docstrings to check.</div>';
+
+  results.style.display = 'block';
+}
+</script>
+</body>
+</html>
